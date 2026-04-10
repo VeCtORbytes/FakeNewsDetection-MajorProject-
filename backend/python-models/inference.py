@@ -265,7 +265,7 @@ def load_detector() -> tuple:
         if MODEL_URL:
             try:
                 logger.info("⬇️ Downloading model from Hugging Face...")
-                gdown.download(MODEL_URL, checkpoint_path, quiet=False)
+                gdown.download(MODEL_URL, checkpoint_path, quiet=True)
                 logger.info("✅ Model downloaded successfully")
             except Exception as e:
                 logger.exception("❌ Model download failed: %s", e)
@@ -349,13 +349,6 @@ MAX_BATCH_SIZE     = int(os.environ.get("MAX_BATCH_SIZE",     20))
 # Module-level detector (loaded once at startup)
 detector = None
 model_loaded = False
-import threading
-
-def load_model_async():
-    global detector, model_loaded
-    detector, model_loaded = load_detector()
-
-threading.Thread(target=load_model_async).start()
 _checkpoint_path = os.environ.get("CHECKPOINT_PATH", "")
 _model_type      = (os.environ.get("MODEL_TYPE") or "muril").strip().lower()
 
@@ -363,6 +356,13 @@ _model_type      = (os.environ.get("MODEL_TYPE") or "muril").strip().lower()
 def create_app() -> Flask:
     app = Flask(__name__)
     CORS(app)
+    import threading
+
+    def load_model_async():
+        global detector, model_loaded
+        detector, model_loaded = load_detector()
+
+    threading.Thread(target=load_model_async, daemon=True).start()
     # Use Flask's built-in request size limit
     app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
 
