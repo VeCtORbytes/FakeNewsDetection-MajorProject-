@@ -347,7 +347,15 @@ MAX_TEXT_LENGTH    = int(os.environ.get("MAX_TEXT_LENGTH",    50_000))
 MAX_BATCH_SIZE     = int(os.environ.get("MAX_BATCH_SIZE",     20))
 
 # Module-level detector (loaded once at startup)
-detector, model_loaded = load_detector()
+detector = None
+model_loaded = False
+import threading
+
+def load_model_async():
+    global detector, model_loaded
+    detector, model_loaded = load_detector()
+
+threading.Thread(target=load_model_async).start()
 _checkpoint_path = os.environ.get("CHECKPOINT_PATH", "")
 _model_type      = (os.environ.get("MODEL_TYPE") or "muril").strip().lower()
 
