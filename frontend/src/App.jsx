@@ -10,6 +10,11 @@ function App() {
   const [language, setLanguage] = useState('en');
   const [showTestModal, setShowTestModal] = useState(false);
 
+  // Dynamic API URL - works for both localhost and production
+  const API_URL = import.meta.env.MODE === 'production' 
+    ? 'https://fakenewsdetection-majorproject.onrender.com'
+    : 'http://localhost:5001';
+
   const languages = [
     { code: 'en', name: 'English', flag: '🇬🇧' },
     { code: 'hi', name: 'हिंदी', flag: '🇮🇳' },
@@ -68,15 +73,24 @@ function App() {
     setLoading(true);
     setError('');
     try {
-      const res = await fetch('http://localhost:5001/predict', {
+      console.log(`📡 Calling: ${API_URL}/predict`);
+      
+      const res = await fetch(`${API_URL}/predict`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text, language })
       });
+      
+      if (!res.ok) {
+        throw new Error(`Backend error: ${res.status}`);
+      }
+      
       const data = await res.json();
+      console.log('✅ Response received:', data);
       setResult(data);
     } catch (e) {
-      setError('Backend not running');
+      console.error('❌ Error:', e);
+      setError(`Connection failed: ${e.message}. Backend URL: ${API_URL}`);
     }
     setLoading(false);
   };
@@ -163,11 +177,11 @@ function App() {
               disabled={loading || !text.trim()}
               className="btn-analyze"
             >
-              {loading ? '⏳ Analyzing...' : ' Analyze'}
+              {loading ? '⏳ Analyzing...' : '+ Analyze'}
             </button>
 
             <button onClick={() => setShowTestModal(true)} className="btn-test">
-               Load Test Example
+              🧪 Load Test Example
             </button>
           </div>
 

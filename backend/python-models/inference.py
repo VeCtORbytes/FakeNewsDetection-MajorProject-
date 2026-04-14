@@ -18,6 +18,8 @@ Key fixes from original:
       rather than a before_request hook to avoid double-checks
     - All module-level state is encapsulated; app factory pattern used so
       the app can be imported without side effects in tests
+    - CORS enabled for production deployment
+    - Uses torch.hub for reliable model downloads from Hugging Face
 """
 
 import os
@@ -25,7 +27,6 @@ import logging
 import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer
-import gdown
 
 # ── Logging ──────────────────────────────────────────────────────────────── #
 logging.basicConfig(
@@ -245,6 +246,47 @@ class FakeNewsDetector:
 #  Model loading                                                               #
 # ════════════════════════════════════════════════════════════════════════════ #
 
+def download_model_from_hf(model_url: str, checkpoint_path: str) -> bool:
+    """
+    Download model from Hugging Face using torch.hub.
+    
+    Args:
+        model_url: Full Hugging Face download URL
+        checkpoint_path: Local path to save the model
+        
+    Returns:
+        True if download successful, False otherwise
+    """
+    if os.path.isfile(checkpoint_path):
+        logger.info(f"✅ Model already exists at {checkpoint_path}")
+        return True
+    
+    if not model_url:
+        logger.warning("⚠️ MODEL_URL not set, skipping download")
+        return False
+    
+    try:
+        logger.info(f"⬇️ Downloading model from Hugging Face...")
+        
+        # Create directory if needed
+        os.makedirs(os.path.dirname(checkpoint_path) or ".", exist_ok=True)
+        
+        # Use torch.hub to download reliably
+        torch.hub.load_state_dict_from_url(
+            model_url,
+            model_dir=os.path.dirname(checkpoint_path) or ".",
+            file_name=os.path.basename(checkpoint_path),
+            progress=True
+        )
+        
+        logger.info(f"✅ Model downloaded successfully to {checkpoint_path}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Model download failed: {e}")
+        return False
+
+
 def load_detector() -> tuple:
     """
     Build a FakeNewsDetector from environment variables.
@@ -262,17 +304,9 @@ def load_detector() -> tuple:
 
     # 🔥 AUTO DOWNLOAD MODEL
     if not os.path.isfile(checkpoint_path):
-        if MODEL_URL:
-            try:
-                logger.info("⬇️ Downloading model from Hugging Face...")
-                gdown.download(MODEL_URL, checkpoint_path, quiet=True)
-                logger.info("✅ Model downloaded successfully")
-            except Exception as e:
-                logger.exception("❌ Model download failed: %s", e)
-                return None, False
-        else:
+        if not download_model_from_hf(MODEL_URL, checkpoint_path):
             logger.warning(
-                "Checkpoint not found at %s and no MODEL_URL provided.",
+                "Checkpoint not found at %s and download failed.",
                 checkpoint_path,
             )
             return None, False
@@ -355,7 +389,21 @@ _model_type      = (os.environ.get("MODEL_TYPE") or "muril").strip().lower()
 
 def create_app() -> Flask:
     app = Flask(__name__)
-    CORS(app)
+    
+    # Enable CORS for production (Vercel frontend)
+    CORS(
+        app,
+        resources={r"/*": {
+            "origins": "*",
+            "methods": ["GET", "POST", "OPTIONS", "HEAD"],
+            "allow_headers": ["Content-Type", "Accept"],
+            "expose_headers": ["Content-Type"],
+            "supports_credentials": False,
+            "max_age": 3600
+        }},
+        send_wildcard=True
+    )
+    
     import threading
 
     def load_model_async():
@@ -374,9 +422,11 @@ def create_app() -> Flask:
             }), 503
         return None
 
-    @app.route("/health", methods=["GET"])
+    @app.route("/health", methods=["GET", "OPTIONS"])
     def health():
         """Health check. Reports model load status, type, and checkpoint."""
+        if request.method == "OPTIONS":
+            return "", 204
         return jsonify({
             "status":          "healthy",
             "model_loaded":    model_loaded,
@@ -384,9 +434,12 @@ def create_app() -> Flask:
             "checkpoint_path": _checkpoint_path,
         }), 200
 
-    @app.route("/predict", methods=["POST"])
+    @app.route("/predict", methods=["POST", "OPTIONS"])
     def predict():
         """Single-text prediction with lightweight normalization and uncertainty gating."""
+        if request.method == "OPTIONS":
+            return "", 204
+        
         err = _require_model()
         if err is not None:
             return err
@@ -504,9 +557,12 @@ def create_app() -> Flask:
             logger.exception("Predict failed: %s", e)
             return jsonify({"error": str(e), "code": "PREDICT_ERROR"}), 500
 
-    @app.route("/batch_predict", methods=["POST"])
+    @app.route("/batch_predict", methods=["POST", "OPTIONS"])
     def batch_predict():
         """Batched prediction (up to MAX_BATCH_SIZE texts per request)."""
+        if request.method == "OPTIONS":
+            return "", 204
+        
         err = _require_model()
         if err is not None:
             return err
