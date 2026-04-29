@@ -95,7 +95,12 @@ class XLMRobertaFakeNewsClassifier(nn.Module):
         #  Classification head                                                #
         # ------------------------------------------------------------------ #
         self.dropout = nn.Dropout(dropout)
-        self.classifier = nn.Linear(self.config.hidden_size, num_classes)
+        self.classifier = nn.Sequential(
+            nn.Linear(self.config.hidden_size, 512),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(512, num_classes)
+        )
         self._init_weights()
 
     # ---------------------------------------------------------------------- #
@@ -103,9 +108,11 @@ class XLMRobertaFakeNewsClassifier(nn.Module):
     # ---------------------------------------------------------------------- #
 
     def _init_weights(self) -> None:
-        """Xavier-uniform init for the linear classifier."""
-        nn.init.xavier_uniform_(self.classifier.weight)
-        nn.init.zeros_(self.classifier.bias)
+        """Xavier-uniform init for the classifier layers."""
+        for layer in self.classifier:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)
+                nn.init.zeros_(layer.bias)
 
     # ---------------------------------------------------------------------- #
     #  Pooling helper                                                         #

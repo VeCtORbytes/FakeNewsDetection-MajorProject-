@@ -639,3 +639,9 @@ svg {
   h2 { font-size: 20px; }
   .stats { grid-template-columns: 1fr; }
 }
+
+.result-badge.uncertain {
+  background: rgba(250, 204, 21, 0.15);
+  color: #facc15;
+  border: 1px solid #facc15;
+}

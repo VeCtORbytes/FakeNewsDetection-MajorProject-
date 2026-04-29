@@ -89,7 +89,9 @@ def _safe_load(model, state_dict: dict) -> None:
         model.load_state_dict(state_dict)
     except RuntimeError as e:
         logger.warning("Strict load failed (%s). Retrying with strict=False.", e)
-        model.load_state_dict(state_dict, strict=False)
+        result = model.load_state_dict(state_dict, strict=False)
+        print("Missing keys:", result.missing_keys)
+        print("Unexpected keys:", result.unexpected_keys)
 
 
 # ════════════════════════════════════════════════════════════════════════════ #
@@ -322,6 +324,17 @@ def load_detector() -> tuple:
             from models.muril_model import MuRILFakeNewsClassifier
             from models.ensemble_model import EnsembleFakeNewsClassifier
 
+            # Detect correct ensemble method from checkpoint
+            inferred_method = "weighted_avg"  # default
+            if any("ensemble_fc" in k for k in state_dict.keys()):
+                inferred_method = "learned"
+                print("Detected Ensemble Method: learned")
+            elif any("weights" in k for k in state_dict.keys()):
+                inferred_method = "weighted_avg"
+                print("Detected Ensemble Method: weighted_avg")
+            else:
+                print("Detected Ensemble Method: weighted_avg (default)")
+
             xlmr  = XLMRobertaFakeNewsClassifier()
             muril = MuRILFakeNewsClassifier()
 
@@ -329,6 +342,7 @@ def load_detector() -> tuple:
                 xlmr_model=xlmr,
                 muril_model=muril,
                 num_classes=2,
+                ensemble_method=inferred_method,
             )
         else:
             model_class = classes.get(raw_type)
@@ -341,6 +355,11 @@ def load_detector() -> tuple:
             model = model_class()
 
         _safe_load(model, state_dict)
+
+        # DEBUG: Validate model after loading
+        print("MODEL TYPE:", type(model).__name__)
+        if hasattr(model, "ensemble_method"):
+            print("ENSEMBLE METHOD:", model.ensemble_method)
 
         detector = FakeNewsDetector(
             model=model,
@@ -385,6 +404,24 @@ detector = None
 model_loaded = False
 _checkpoint_path = os.environ.get("CHECKPOINT_PATH", "")
 _model_type      = (os.environ.get("MODEL_TYPE") or "muril").strip().lower()
+
+
+# ── Text normalization (module-level for reuse) ────────────────────────────── #
+
+def _normalize_text(text: str) -> str:
+    """Normalize noisy real-world text before the cleaning pipeline."""
+    import unicodedata
+    import re
+    
+    text = unicodedata.normalize("NFKC", text)
+    text = re.sub(r"[\u200b-\u200f\u2060\ufeff]", "", text)
+    text = text.replace("\r", "\n")
+    text = re.sub(r"(https?://\S+|www\.\S+)", " ", text)
+    text = re.sub(r"@\w+", " ", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"([!?.,])\1{2,}", r"\1\1", text)
+    return text.strip()
 
 
 def create_app() -> Flask:
@@ -469,17 +506,6 @@ def create_app() -> Flask:
                 }), 400
 
             # CHANGE: normalize noisy real-world text before the existing cleaning pipeline.
-            def _normalize_text(text: str) -> str:
-                text = unicodedata.normalize("NFKC", text)
-                text = re.sub(r"[\u200b-\u200f\u2060\ufeff]", "", text)
-                text = text.replace("\r", "\n")
-                text = re.sub(r"(https?://\S+|www\.\S+)", " ", text)
-                text = re.sub(r"@\w+", " ", text)
-                text = re.sub(r"[ \t]+", " ", text)
-                text = re.sub(r"\n{3,}", "\n\n", text)
-                text = re.sub(r"([!?.,])\1{2,}", r"\1\1", text)
-                return text.strip()
-
             normalized_text = _normalize_text(raw_text)
             text = clean_text_for_inference(normalized_text)
             if not text:
@@ -582,6 +608,7 @@ def create_app() -> Flask:
             cleaned = []
             for t in texts:
                 s = (t if isinstance(t, str) else str(t)).strip()[:MAX_TEXT_LENGTH]
+                s = _normalize_text(s)
                 s = clean_text_for_inference(s)
                 cleaned.append(s or "")
 

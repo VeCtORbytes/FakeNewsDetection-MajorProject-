@@ -226,9 +226,26 @@ function App() {
             </div>
           ) : (
             <div className="result-panel">
-              <div className={`result-badge ${result.prediction === 'Real' ? 'real' : 'fake'}`}>
-                {result.prediction === 'Real' ? '✓ AUTHENTIC' : '✕ SUSPICIOUS'}
-              </div>
+             <div
+  className={`result-badge ${
+    result.prediction === 'Real'
+      ? 'real'
+      : result.prediction === 'Fake'
+      ? 'fake'
+      : 'uncertain'
+  }`}
+>
+  {result.prediction === 'Real'
+    ? '✓ AUTHENTIC'
+    : result.prediction === 'Fake'
+    ? '✕ SUSPICIOUS'
+    : '⚠️ UNCERTAIN'}
+</div>
+{result.prediction === 'Uncertain' && (
+  <div style={{ marginBottom: '15px', color: '#facc15', fontSize: '13px' }}>
+    ⚠️ {result.reason || 'Low confidence prediction'}
+  </div>
+)}
 
               <div className="confidence-meter">
                 <svg viewBox="0 0 180 180">
