@@ -125,18 +125,16 @@ class FakeNewsDetector:
         self.model_type = model_type.strip().lower()
         self.device     = device
         self.max_length = max_length
-        self.special_tokens_to_add = self.tokenizer.num_special_tokens_to_add(pair=False)
-
-    def _tokenise(self, texts: list[str]) -> dict:
-        """Tokenise texts with dynamic padding for efficient inference."""
-        enc = self.tokenizer(
+    def _encode(self, texts: list[str], include_special_tokens_mask: bool = False) -> dict:
+        """Raw tokenizer output (on CPU) with optional special-token mask."""
+        return self.tokenizer(
             texts,
             max_length=self.max_length,
             padding="longest",
             truncation=True,
             return_tensors="pt",
+            return_special_tokens_mask=include_special_tokens_mask,
         )
-        return {k: v.to(self.device) for k, v in enc.items()}
 
     def tokenise(self, texts: list[str]) -> dict:
         """
@@ -149,28 +147,26 @@ class FakeNewsDetector:
             Dict containing input_ids, attention_mask, and optional token_type_ids
             tensors moved to the detector device.
         """
-        return self._tokenise(texts)
+        enc = self._encode(texts)
+        return {k: v.to(self.device) for k, v in enc.items()}
 
-    def tokenise_with_lengths(self, texts: list[str]) -> tuple[dict, list[int]]:
+    def tokenise_with_counts(self, texts: list[str]) -> tuple[dict, list[int]]:
         """
-        Tokenise texts and return per-text token lengths.
+        Tokenise texts and return per-text token counts.
 
         Args:
             texts: List of input strings.
 
         Returns:
-            Tuple of (encoded_inputs, lengths) where lengths count non-padding
-            tokens including special tokens.
+            Tuple of (encoded_inputs, counts) where counts include only
+            non-padding, non-special tokens.
         """
-        enc = self.tokenizer(
-            texts,
-            max_length=self.max_length,
-            padding="longest",
-            truncation=True,
-            return_tensors="pt",
-        )
-        lengths = enc["attention_mask"].sum(dim=1).tolist()
-        return {k: v.to(self.device) for k, v in enc.items()}, lengths
+        enc = self._encode(texts, include_special_tokens_mask=True)
+        attention_mask = enc["attention_mask"]
+        special_mask = enc["special_tokens_mask"]
+        counts = (attention_mask - special_mask).sum(dim=1).tolist()
+        enc.pop("special_tokens_mask", None)
+        return {k: v.to(self.device) for k, v in enc.items()}, counts
 
     def _get_probs(self, enc: dict) -> torch.Tensor:
         """
@@ -233,7 +229,7 @@ class FakeNewsDetector:
                 language = "unknown"
 
         if tokenized_inputs is None:
-            tokenized_inputs = self._tokenise([text])
+            tokenized_inputs = self.tokenise([text])
         probs = self._get_probs(tokenized_inputs)          # [1, num_classes]
 
         pred_idx   = probs.argmax(dim=-1).item()
@@ -273,7 +269,7 @@ class FakeNewsDetector:
             except Exception:
                 languages.append("unknown")
 
-        enc   = self._tokenise(texts)
+        enc   = self.tokenise(texts)
         probs = self._get_probs(enc)     # [batch, num_classes]
         probs_np = probs.cpu().numpy()
 
@@ -583,15 +579,12 @@ def create_app() -> Flask:
             if not text:
                 return jsonify({"error": "Text empty after cleaning", "code": "NO_TEXT"}), 400
 
-            tokenized_inputs, lengths = detector.tokenise_with_lengths([text])
+            tokenized_inputs, token_counts = detector.tokenise_with_counts([text])
 
             # CHANGE: derive simple quality signals to guard short/noisy inputs.
             word_count = len(text.split())
             char_count = len(text)
-            token_count = max(
-                lengths[0] - detector.special_tokens_to_add,
-                0,
-            )
+            token_count = max(token_counts[0], 0)
             alpha_chars = sum(ch.isalpha() for ch in text)
             digit_chars = sum(ch.isdigit() for ch in text)
             alpha_ratio = alpha_chars / max(char_count, 1)
