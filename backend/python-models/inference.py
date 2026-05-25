@@ -24,6 +24,7 @@ Key fixes from original:
 
 import os
 import logging
+import re
 import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer
@@ -164,7 +165,7 @@ class FakeNewsDetector:
         enc = self._encode(texts, include_special_tokens_mask=True)
         attention_mask = enc["attention_mask"]
         special_mask = enc["special_tokens_mask"]
-        counts = (attention_mask - special_mask).sum(dim=1).tolist()
+        counts = (attention_mask * (1 - special_mask)).sum(dim=1).tolist()
         enc.pop("special_tokens_mask", None)
         return {k: v.to(self.device) for k, v in enc.items()}, counts
 
@@ -468,7 +469,6 @@ def _normalize_language_hint(language_hint: str | None) -> str | None:
     language_hint = language_hint.strip().lower()
     if not language_hint:
         return None
-    import re
     if re.fullmatch(r"[a-z]{2,3}(-[a-z]{2,3})*", language_hint) is None:
         return None
     return language_hint
@@ -477,7 +477,6 @@ def _normalize_language_hint(language_hint: str | None) -> str | None:
 def _normalize_text(text: str) -> str:
     """Normalize noisy real-world text before the cleaning pipeline."""
     import unicodedata
-    import re
     
     text = unicodedata.normalize("NFKC", text)
     text = re.sub(r"[\u200b-\u200f\u2060\ufeff]", "", text)
@@ -582,7 +581,7 @@ def create_app() -> Flask:
             # CHANGE: derive simple quality signals to guard short/noisy inputs.
             word_count = len(text.split())
             char_count = len(text)
-            token_count = int(token_counts[0])
+            token_count = int(token_counts[0]) if token_counts else 0
             alpha_chars = sum(ch.isalpha() for ch in text)
             digit_chars = sum(ch.isdigit() for ch in text)
             alpha_ratio = alpha_chars / max(char_count, 1)
