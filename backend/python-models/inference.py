@@ -131,27 +131,44 @@ class FakeNewsDetector:
         enc = self.tokenizer(
             texts,
             max_length=self.max_length,
-            padding=True,
+            padding="longest",
             truncation=True,
             return_tensors="pt",
         )
         return {k: v.to(self.device) for k, v in enc.items()}
 
     def tokenise(self, texts: list[str]) -> dict:
-        """Public wrapper for tokenisation."""
+        """
+        Tokenise texts for inference.
+
+        Args:
+            texts: List of input strings.
+
+        Returns:
+            Dict containing input_ids, attention_mask, and optional token_type_ids
+            tensors moved to the detector device.
+        """
         return self._tokenise(texts)
 
     def tokenise_with_lengths(self, texts: list[str]) -> tuple[dict, list[int]]:
-        """Tokenise texts and return per-text token lengths."""
+        """
+        Tokenise texts and return per-text token lengths.
+
+        Args:
+            texts: List of input strings.
+
+        Returns:
+            Tuple of (encoded_inputs, lengths) where lengths count non-padding
+            tokens including special tokens.
+        """
         enc = self.tokenizer(
             texts,
             max_length=self.max_length,
-            padding=True,
+            padding="longest",
             truncation=True,
             return_tensors="pt",
-            return_length=True,
         )
-        lengths = enc.pop("length").tolist()
+        lengths = enc["attention_mask"].sum(dim=1).tolist()
         return {k: v.to(self.device) for k, v in enc.items()}, lengths
 
     def _get_probs(self, enc: dict) -> torch.Tensor:
@@ -215,7 +232,7 @@ class FakeNewsDetector:
                 language = "unknown"
 
         if tokenized_inputs is None:
-            tokenized_inputs = self.tokenise([text])
+            tokenized_inputs = self._tokenise([text])
         probs = self._get_probs(tokenized_inputs)          # [1, num_classes]
 
         pred_idx   = probs.argmax(dim=-1).item()
@@ -448,7 +465,7 @@ _model_type      = (os.environ.get("MODEL_TYPE") or "muril").strip().lower()
 
 # ── Text normalization (module-level for reuse) ────────────────────────────── #
 
-def _normalize_language_hint(language_hint: object) -> str | None:
+def _normalize_language_hint(language_hint: str | None) -> str | None:
     if not isinstance(language_hint, str):
         return None
     language_hint = language_hint.strip().lower()
