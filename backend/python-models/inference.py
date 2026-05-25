@@ -125,6 +125,7 @@ class FakeNewsDetector:
         self.model_type = model_type.strip().lower()
         self.device     = device
         self.max_length = max_length
+        self.special_tokens_to_add = self.tokenizer.num_special_tokens_to_add(pair=False)
 
     def _tokenise(self, texts: list[str]) -> dict:
         """Tokenise texts with dynamic padding for efficient inference."""
@@ -588,7 +589,7 @@ def create_app() -> Flask:
             word_count = len(text.split())
             char_count = len(text)
             token_count = max(
-                lengths[0] - detector.tokenizer.num_special_tokens_to_add(pair=False),
+                lengths[0] - detector.special_tokens_to_add,
                 0,
             )
             alpha_chars = sum(ch.isalpha() for ch in text)
