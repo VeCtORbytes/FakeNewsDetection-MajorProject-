@@ -127,7 +127,7 @@ class FakeNewsDetector:
         self.max_length = max_length
 
     def _tokenise(self, texts: list[str]) -> dict:
-        """Tokenise a list of texts into tensors on the correct device."""
+        """Tokenise texts with dynamic padding for efficient inference."""
         enc = self.tokenizer(
             texts,
             max_length=self.max_length,
@@ -171,7 +171,7 @@ class FakeNewsDetector:
         self,
         text: str,
         return_probabilities: bool = False,
-        enc: dict | None = None,
+        tokenized_inputs: dict | None = None,
         language_hint: str | None = None,
     ) -> dict:
         """
@@ -180,6 +180,8 @@ class FakeNewsDetector:
         Args:
             text:                 Input text.
             return_probabilities: Include per-class probabilities in result.
+            tokenized_inputs:     Pre-tokenized inputs to reuse encoding work.
+            language_hint:        Optional language tag to skip auto-detection.
 
         Returns:
             dict with: prediction, confidence, language,
@@ -194,9 +196,9 @@ class FakeNewsDetector:
             except Exception:
                 language = "unknown"
 
-        if enc is None:
-            enc = self._tokenise([text])
-        probs = self._get_probs(enc)          # [1, num_classes]
+        if tokenized_inputs is None:
+            tokenized_inputs = self._tokenise([text])
+        probs = self._get_probs(tokenized_inputs)          # [1, num_classes]
 
         pred_idx   = probs.argmax(dim=-1).item()
         pred_label = "Real" if pred_idx == 1 else "Fake"
@@ -509,7 +511,16 @@ def create_app() -> Flask:
                 return jsonify({"error": "Invalid or missing JSON", "code": "INVALID_JSON"}), 400
 
             language_hint = data.get("language")
-            if not isinstance(language_hint, str) or not language_hint.strip():
+            if isinstance(language_hint, str):
+                language_hint = language_hint.strip().lower()
+                if (
+                    not language_hint
+                    or language_hint.startswith("-")
+                    or language_hint.endswith("-")
+                    or not all(ch.isalpha() or ch == "-" for ch in language_hint)
+                ):
+                    language_hint = None
+            else:
                 language_hint = None
 
             raw_text = data.get("text", "")
@@ -533,12 +544,12 @@ def create_app() -> Flask:
             if not text:
                 return jsonify({"error": "Text empty after cleaning", "code": "NO_TEXT"}), 400
 
-            enc = detector._tokenise([text])
+            tokenized_inputs = detector._tokenise([text])
 
             # CHANGE: derive simple quality signals to guard short/noisy inputs.
             word_count = len(text.split())
             char_count = len(text)
-            token_count = int(enc["attention_mask"][0].sum().item())
+            token_count = int(tokenized_inputs["attention_mask"][0].sum().item())
             token_count = max(
                 token_count - detector.tokenizer.num_special_tokens_to_add(pair=False),
                 0,
@@ -555,7 +566,7 @@ def create_app() -> Flask:
             result = detector.predict(
                 text,
                 return_probabilities=True,
-                enc=enc,
+                tokenized_inputs=tokenized_inputs,
                 language_hint=language_hint,
             )
 
