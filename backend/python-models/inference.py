@@ -24,6 +24,7 @@ Key fixes from original:
 
 import os
 import logging
+import re
 import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer
@@ -125,17 +126,48 @@ class FakeNewsDetector:
         self.model_type = model_type.strip().lower()
         self.device     = device
         self.max_length = max_length
-
-    def _tokenise(self, texts: list[str]) -> dict:
-        """Tokenise a list of texts into tensors on the correct device."""
-        enc = self.tokenizer(
+    def _encode(self, texts: list[str], include_special_tokens_mask: bool = False) -> dict:
+        """Raw tokenizer output (on CPU) with optional special-token mask."""
+        return self.tokenizer(
             texts,
             max_length=self.max_length,
-            padding="max_length",
+            padding="longest",
             truncation=True,
             return_tensors="pt",
+            return_special_tokens_mask=include_special_tokens_mask,
         )
+
+    def tokenise(self, texts: list[str]) -> dict:
+        """
+        Tokenise texts for inference.
+
+        Args:
+            texts: List of input strings.
+
+        Returns:
+            Dict containing input_ids, attention_mask, and optional token_type_ids
+            tensors moved to the detector device.
+        """
+        enc = self._encode(texts)
         return {k: v.to(self.device) for k, v in enc.items()}
+
+    def tokenise_with_counts(self, texts: list[str]) -> tuple[dict, list[int]]:
+        """
+        Tokenise texts and return per-text token counts.
+
+        Args:
+            texts: List of input strings.
+
+        Returns:
+            Tuple of (encoded_inputs, counts) where counts include only
+            non-padding, non-special tokens.
+        """
+        enc = self._encode(texts, include_special_tokens_mask=True)
+        attention_mask = enc["attention_mask"]
+        special_mask = enc["special_tokens_mask"]
+        counts = (attention_mask * (1 - special_mask)).sum(dim=1).tolist()
+        enc.pop("special_tokens_mask", None)
+        return {k: v.to(self.device) for k, v in enc.items()}, counts
 
     def _get_probs(self, enc: dict) -> torch.Tensor:
         """
@@ -167,26 +199,39 @@ class FakeNewsDetector:
 
         return F.softmax(logits, dim=-1)
 
-    def predict(self, text: str, return_probabilities: bool = False) -> dict:
+    def predict(
+        self,
+        text: str,
+        return_probabilities: bool = False,
+        tokenized_inputs: dict | None = None,
+        language_hint: str | None = None,
+    ) -> dict:
         """
         Predict for a single text.
 
         Args:
             text:                 Input text.
             return_probabilities: Include per-class probabilities in result.
+            tokenized_inputs:     Pre-tokenized inputs to reuse encoding work.
+            language_hint:        Optional language tag to skip auto-detection.
 
         Returns:
             dict with: prediction, confidence, language,
                        and optionally probabilities.
         """
-        try:
-            from langdetect import detect
-            language = detect(text)
-        except Exception:
-            language = "unknown"
+        normalized_language = _normalize_language_hint(language_hint)
+        if normalized_language:
+            language = normalized_language
+        else:
+            try:
+                from langdetect import detect
+                language = detect(text)
+            except Exception:
+                language = "unknown"
 
-        enc   = self._tokenise([text])
-        probs = self._get_probs(enc)          # [1, num_classes]
+        if tokenized_inputs is None:
+            tokenized_inputs = self.tokenise([text])
+        probs = self._get_probs(tokenized_inputs)          # [1, num_classes]
 
         pred_idx   = probs.argmax(dim=-1).item()
         pred_label = "Real" if pred_idx == 1 else "Fake"
@@ -225,7 +270,7 @@ class FakeNewsDetector:
             except Exception:
                 languages.append("unknown")
 
-        enc   = self._tokenise(texts)
+        enc   = self.tokenise(texts)
         probs = self._get_probs(enc)     # [batch, num_classes]
         probs_np = probs.cpu().numpy()
 
@@ -378,11 +423,21 @@ def load_detector() -> tuple:
 
 # ── Text cleaning (matches training pipeline) ────────────────────────────── #
 
+_PREPROCESSOR = None
+
+
+def _get_preprocessor():
+    global _PREPROCESSOR
+    if _PREPROCESSOR is None:
+        from utils.preprocessing import DataPreprocessor
+        _PREPROCESSOR = DataPreprocessor()
+    return _PREPROCESSOR
+
+
 def clean_text_for_inference(text: str) -> str:
     """Apply same cleaning as training pipeline. Falls back gracefully."""
     try:
-        from utils.preprocessing import DataPreprocessor
-        return DataPreprocessor().clean_text(text or "")
+        return _get_preprocessor().clean_text(text or "")
     except Exception:
         return (text or "").strip()[:50_000]
 
@@ -408,10 +463,20 @@ _model_type      = (os.environ.get("MODEL_TYPE") or "muril").strip().lower()
 
 # ── Text normalization (module-level for reuse) ────────────────────────────── #
 
+def _normalize_language_hint(language_hint: str | None) -> str | None:
+    if not isinstance(language_hint, str):
+        return None
+    language_hint = language_hint.strip().lower()
+    if not language_hint:
+        return None
+    if re.fullmatch(r"[a-z]{2,3}(-[a-z]{2,3})*", language_hint) is None:
+        return None
+    return language_hint
+
+
 def _normalize_text(text: str) -> str:
     """Normalize noisy real-world text before the cleaning pipeline."""
     import unicodedata
-    import re
     
     text = unicodedata.normalize("NFKC", text)
     text = re.sub(r"[\u200b-\u200f\u2060\ufeff]", "", text)
@@ -483,12 +548,12 @@ def create_app() -> Flask:
         try:
             # CHANGE: local imports keep this update self-contained.
             import math
-            import re
-            import unicodedata
 
             data = request.get_json(silent=True)
             if data is None:
                 return jsonify({"error": "Invalid or missing JSON", "code": "INVALID_JSON"}), 400
+
+            language_hint = _normalize_language_hint(data.get("language"))
 
             raw_text = data.get("text", "")
             if raw_text is None:
@@ -511,10 +576,12 @@ def create_app() -> Flask:
             if not text:
                 return jsonify({"error": "Text empty after cleaning", "code": "NO_TEXT"}), 400
 
+            tokenized_inputs, token_counts = detector.tokenise_with_counts([text])
+
             # CHANGE: derive simple quality signals to guard short/noisy inputs.
             word_count = len(text.split())
             char_count = len(text)
-            token_count = len(detector.tokenizer.tokenize(text))
+            token_count = int(token_counts[0]) if token_counts else 0
             alpha_chars = sum(ch.isalpha() for ch in text)
             digit_chars = sum(ch.isdigit() for ch in text)
             alpha_ratio = alpha_chars / max(char_count, 1)
@@ -524,7 +591,12 @@ def create_app() -> Flask:
             is_very_short = char_count < 20 or word_count < 4 or token_count < 6
             is_noisy = alpha_ratio < 0.45 or digit_ratio > 0.30
 
-            result = detector.predict(text, return_probabilities=True)
+            result = detector.predict(
+                text,
+                return_probabilities=True,
+                tokenized_inputs=tokenized_inputs,
+                language_hint=language_hint,
+            )
 
             fake_prob = float(result.get("probabilities", {}).get("Fake", 0.0))
             real_prob = float(result.get("probabilities", {}).get("Real", 0.0))
