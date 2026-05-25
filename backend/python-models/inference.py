@@ -466,12 +466,10 @@ def _normalize_language_hint(language_hint: str | None) -> str | None:
     if not isinstance(language_hint, str):
         return None
     language_hint = language_hint.strip().lower()
-    if (
-        not language_hint
-        or language_hint.startswith("-")
-        or language_hint.endswith("-")
-        or not all(ch.isalpha() or ch == "-" for ch in language_hint)
-    ):
+    if not language_hint:
+        return None
+    import re
+    if re.fullmatch(r"[a-z]{2,3}(-[a-z]{2,3})*", language_hint) is None:
         return None
     return language_hint
 
@@ -584,7 +582,7 @@ def create_app() -> Flask:
             # CHANGE: derive simple quality signals to guard short/noisy inputs.
             word_count = len(text.split())
             char_count = len(text)
-            token_count = max(token_counts[0], 0)
+            token_count = int(token_counts[0])
             alpha_chars = sum(ch.isalpha() for ch in text)
             digit_chars = sum(ch.isdigit() for ch in text)
             alpha_ratio = alpha_chars / max(char_count, 1)
