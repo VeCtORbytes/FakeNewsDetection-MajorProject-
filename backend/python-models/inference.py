@@ -131,7 +131,7 @@ class FakeNewsDetector:
         enc = self.tokenizer(
             texts,
             max_length=self.max_length,
-            padding="max_length",
+            padding=True,
             truncation=True,
             return_tensors="pt",
         )
@@ -167,7 +167,13 @@ class FakeNewsDetector:
 
         return F.softmax(logits, dim=-1)
 
-    def predict(self, text: str, return_probabilities: bool = False) -> dict:
+    def predict(
+        self,
+        text: str,
+        return_probabilities: bool = False,
+        enc: dict | None = None,
+        language_hint: str | None = None,
+    ) -> dict:
         """
         Predict for a single text.
 
@@ -179,13 +185,17 @@ class FakeNewsDetector:
             dict with: prediction, confidence, language,
                        and optionally probabilities.
         """
-        try:
-            from langdetect import detect
-            language = detect(text)
-        except Exception:
-            language = "unknown"
+        if isinstance(language_hint, str) and language_hint.strip():
+            language = language_hint.strip().lower()
+        else:
+            try:
+                from langdetect import detect
+                language = detect(text)
+            except Exception:
+                language = "unknown"
 
-        enc   = self._tokenise([text])
+        if enc is None:
+            enc = self._tokenise([text])
         probs = self._get_probs(enc)          # [1, num_classes]
 
         pred_idx   = probs.argmax(dim=-1).item()
@@ -378,11 +388,21 @@ def load_detector() -> tuple:
 
 # ── Text cleaning (matches training pipeline) ────────────────────────────── #
 
+_PREPROCESSOR = None
+
+
+def _get_preprocessor():
+    global _PREPROCESSOR
+    if _PREPROCESSOR is None:
+        from utils.preprocessing import DataPreprocessor
+        _PREPROCESSOR = DataPreprocessor()
+    return _PREPROCESSOR
+
+
 def clean_text_for_inference(text: str) -> str:
     """Apply same cleaning as training pipeline. Falls back gracefully."""
     try:
-        from utils.preprocessing import DataPreprocessor
-        return DataPreprocessor().clean_text(text or "")
+        return _get_preprocessor().clean_text(text or "")
     except Exception:
         return (text or "").strip()[:50_000]
 
@@ -483,12 +503,14 @@ def create_app() -> Flask:
         try:
             # CHANGE: local imports keep this update self-contained.
             import math
-            import re
-            import unicodedata
 
             data = request.get_json(silent=True)
             if data is None:
                 return jsonify({"error": "Invalid or missing JSON", "code": "INVALID_JSON"}), 400
+
+            language_hint = data.get("language")
+            if not isinstance(language_hint, str) or not language_hint.strip():
+                language_hint = None
 
             raw_text = data.get("text", "")
             if raw_text is None:
@@ -511,10 +533,16 @@ def create_app() -> Flask:
             if not text:
                 return jsonify({"error": "Text empty after cleaning", "code": "NO_TEXT"}), 400
 
+            enc = detector._tokenise([text])
+
             # CHANGE: derive simple quality signals to guard short/noisy inputs.
             word_count = len(text.split())
             char_count = len(text)
-            token_count = len(detector.tokenizer.tokenize(text))
+            token_count = int(enc["attention_mask"][0].sum().item())
+            token_count = max(
+                token_count - detector.tokenizer.num_special_tokens_to_add(pair=False),
+                0,
+            )
             alpha_chars = sum(ch.isalpha() for ch in text)
             digit_chars = sum(ch.isdigit() for ch in text)
             alpha_ratio = alpha_chars / max(char_count, 1)
@@ -524,7 +552,12 @@ def create_app() -> Flask:
             is_very_short = char_count < 20 or word_count < 4 or token_count < 6
             is_noisy = alpha_ratio < 0.45 or digit_ratio > 0.30
 
-            result = detector.predict(text, return_probabilities=True)
+            result = detector.predict(
+                text,
+                return_probabilities=True,
+                enc=enc,
+                language_hint=language_hint,
+            )
 
             fake_prob = float(result.get("probabilities", {}).get("Fake", 0.0))
             real_prob = float(result.get("probabilities", {}).get("Real", 0.0))
