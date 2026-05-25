@@ -137,6 +137,23 @@ class FakeNewsDetector:
         )
         return {k: v.to(self.device) for k, v in enc.items()}
 
+    def tokenise(self, texts: list[str]) -> dict:
+        """Public wrapper for tokenisation."""
+        return self._tokenise(texts)
+
+    def tokenise_with_lengths(self, texts: list[str]) -> tuple[dict, list[int]]:
+        """Tokenise texts and return per-text token lengths."""
+        enc = self.tokenizer(
+            texts,
+            max_length=self.max_length,
+            padding=True,
+            truncation=True,
+            return_tensors="pt",
+            return_length=True,
+        )
+        lengths = enc.pop("length").tolist()
+        return {k: v.to(self.device) for k, v in enc.items()}, lengths
+
     def _get_probs(self, enc: dict) -> torch.Tensor:
         """
         Run forward pass and return probability tensor [batch, num_classes].
@@ -187,8 +204,9 @@ class FakeNewsDetector:
             dict with: prediction, confidence, language,
                        and optionally probabilities.
         """
-        if isinstance(language_hint, str) and language_hint.strip():
-            language = language_hint.strip().lower()
+        normalized_language = _normalize_language_hint(language_hint)
+        if normalized_language:
+            language = normalized_language
         else:
             try:
                 from langdetect import detect
@@ -197,7 +215,7 @@ class FakeNewsDetector:
                 language = "unknown"
 
         if tokenized_inputs is None:
-            tokenized_inputs = self._tokenise([text])
+            tokenized_inputs = self.tokenise([text])
         probs = self._get_probs(tokenized_inputs)          # [1, num_classes]
 
         pred_idx   = probs.argmax(dim=-1).item()
@@ -430,6 +448,20 @@ _model_type      = (os.environ.get("MODEL_TYPE") or "muril").strip().lower()
 
 # ── Text normalization (module-level for reuse) ────────────────────────────── #
 
+def _normalize_language_hint(language_hint: object) -> str | None:
+    if not isinstance(language_hint, str):
+        return None
+    language_hint = language_hint.strip().lower()
+    if (
+        not language_hint
+        or language_hint.startswith("-")
+        or language_hint.endswith("-")
+        or not all(ch.isalpha() or ch == "-" for ch in language_hint)
+    ):
+        return None
+    return language_hint
+
+
 def _normalize_text(text: str) -> str:
     """Normalize noisy real-world text before the cleaning pipeline."""
     import unicodedata
@@ -510,18 +542,7 @@ def create_app() -> Flask:
             if data is None:
                 return jsonify({"error": "Invalid or missing JSON", "code": "INVALID_JSON"}), 400
 
-            language_hint = data.get("language")
-            if isinstance(language_hint, str):
-                language_hint = language_hint.strip().lower()
-                if (
-                    not language_hint
-                    or language_hint.startswith("-")
-                    or language_hint.endswith("-")
-                    or not all(ch.isalpha() or ch == "-" for ch in language_hint)
-                ):
-                    language_hint = None
-            else:
-                language_hint = None
+            language_hint = _normalize_language_hint(data.get("language"))
 
             raw_text = data.get("text", "")
             if raw_text is None:
@@ -544,14 +565,13 @@ def create_app() -> Flask:
             if not text:
                 return jsonify({"error": "Text empty after cleaning", "code": "NO_TEXT"}), 400
 
-            tokenized_inputs = detector._tokenise([text])
+            tokenized_inputs, lengths = detector.tokenise_with_lengths([text])
 
             # CHANGE: derive simple quality signals to guard short/noisy inputs.
             word_count = len(text.split())
             char_count = len(text)
-            token_count = int(tokenized_inputs["attention_mask"][0].sum().item())
             token_count = max(
-                token_count - detector.tokenizer.num_special_tokens_to_add(pair=False),
+                lengths[0] - detector.tokenizer.num_special_tokens_to_add(pair=False),
                 0,
             )
             alpha_chars = sum(ch.isalpha() for ch in text)
