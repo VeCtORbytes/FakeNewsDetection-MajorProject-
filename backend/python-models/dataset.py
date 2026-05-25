@@ -56,7 +56,7 @@ class MultilingualFakeNewsDataset(Dataset):
                             'xlm-roberta-base'        for XLM-RoBERTa
                             'google/muril-base-cased' for MuRIL / ensemble
                             'ensemble'                to mirror inference config
-            max_length:     Tokenisation truncation/padding length.
+            max_length:     Tokenization truncation/padding length.
         """
         if not (len(texts) == len(labels) == len(languages)):
             raise ValueError(
